@@ -13,6 +13,7 @@ Use this skill when the user wants to:
 
 - Export or extract files from a specific Perforce changelist number
 - Get a local copy of all files in a submitted changelist
+- Get a local copy of all files in a pending (open/unshelved) changelist
 - Save changelist contents to disk for review, archival, or sharing
 
 Do **not** use when the goal is to apply or port changes to another workspace/stream — that workflow uses `p4 describe`, `p4 print`, `p4 edit`, and direct file editing instead.
@@ -21,7 +22,8 @@ Do **not** use when the goal is to apply or port changes to another workspace/st
 
 - The Perforce command-line client (`p4`) must be installed and available in PATH.
 - The user must have network access to the Perforce server and permissions to read the files in the target changelist.
-- Workspace validation is **not required** — the script uses only server-side commands (`p4 describe`, `p4 print`) that do not depend on the local workspace mapping.
+- For **submitted** changelists: workspace validation is not required — the script uses only server-side commands (`p4 describe`, `p4 print`) that do not depend on the local workspace mapping.
+- For **pending** changelists: a valid local workspace mapping is required. The script uses `p4 where` to resolve depot paths to local file paths and copies the local files directly. The files must exist on disk (i.e., checked out, not just shelved).
 
 ## Parameters
 
@@ -52,14 +54,16 @@ Replace `<skill_directory>` with the absolute path to the directory containing `
 ## What the Script Does
 
 1. Runs `p4 describe -s <changelist>` to list all affected files and their actions.
-2. Auto-detects the depot root from the file paths (first two path components, e.g. `//depot/stream/`).
-3. Creates an output folder named `CL<changelist>` under the output directory.
-4. For each file in the changelist:
+2. Detects whether the changelist is **pending** or **submitted** from the describe output.
+3. Auto-detects the depot root from the file paths (first two path components, e.g. `//depot/stream/`).
+4. Creates an output folder named `CL<changelist>` under the output directory.
+5. For each file in the changelist:
    - **Skips** files with delete actions (`delete`, `move/delete`, `purge`) since there is no content to export.
    - Strips the depot root to compute a relative path.
    - Recreates the directory structure locally.
-   - Uses `p4 print -o` to write the file at the correct revision to the local path.
-5. Prints a summary showing the count of succeeded, skipped, and failed files.
+   - **Submitted CL**: uses `p4 print -o` to write the file at the correct revision from the server.
+   - **Pending CL**: uses `p4 where` to resolve the depot path to the local workspace path, then copies the local file directly.
+6. Prints a summary showing the count of succeeded, skipped, and failed files.
 
 ## Output
 
@@ -79,5 +83,6 @@ The relative paths mirror the depot structure below the auto-detected depot root
 - If `p4` is not in PATH, the script exits with an error.
 - If the changelist does not exist, the script exits with an error.
 - If a changelist has no affected files, the script exits cleanly with a warning.
+- For pending CLs, if `p4 where` fails or the local file does not exist on disk, that file is counted as a failure.
 - Individual file failures (e.g., permission issues, directory creation errors) are logged but do not stop the export of remaining files. A summary of failed files is printed at the end.
 - The script exits with code 1 if any files failed, and code 0 otherwise.

@@ -5,7 +5,11 @@
 .DESCRIPTION
     Runs `p4 describe -s <changelist>` to get the list of affected files,
     strips the configured depot root prefix, recreates the relative directory
-    structure under an output folder, and uses `p4 print` to copy each file.
+    structure under an output folder, and copies each file.
+
+    For submitted changelists, uses `p4 print` to fetch files from the server.
+    For pending (shelved or open) changelists, uses `p4 where` to map depot
+    paths to local workspace paths and copies the local files directly.
 
 .PARAMETER Changelist
     The Perforce changelist number to export. (Mandatory)
@@ -27,6 +31,10 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$OutputDir = (Get-Location).Path
 )
+
+# ── Encoding Safety ──────────────────────────────────────────────
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -76,6 +84,28 @@ $describeText = $describeOutput -join "`n"
 if ($describeText -match 'no such changelist') {
     Write-Error "Changelist $Changelist was not found on the server."
     exit 1
+}
+
+# Detect whether the changelist is pending (not yet submitted)
+# p4 describe output starts with "Change <n> by <user>@<client> on <date> *pending*"
+$isPending = $describeText -match '\*pending\*'
+if ($isPending) {
+    Write-Status "Changelist $Changelist is pending — local workspace files will be used." 'Yellow'
+
+    # Resolve the owning client from `p4 opened` so p4 where uses the correct workspace
+    $openedOutput = & p4 opened -c $Changelist 2>&1
+    $p4Client = $null
+    foreach ($line in $openedOutput) {
+        if ($line -match '@(\S+)\s*$') {
+            $p4Client = $Matches[1]
+            break
+        }
+    }
+    if (-not $p4Client) {
+        Write-Error "Could not determine the P4 client for pending changelist $Changelist."
+        exit 1
+    }
+    Write-Status "Using P4 client: $p4Client"
 }
 
 # ---- 3. Parse affected file lines ------------------------------------------
@@ -136,8 +166,6 @@ $index = 0
 foreach ($entry in $fileEntries) {
     $index++
     $depotPath = $entry.DepotPath
-    $revision  = $entry.Revision
-    $fileSpec  = "$depotPath#$revision"
 
     # Strip depot root to obtain a relative path
     if (-not $depotPath.StartsWith($DepotRoot)) {
@@ -168,25 +196,70 @@ foreach ($entry in $fileEntries) {
         try {
             New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
         } catch {
-            Write-Host "  [$index/$($fileEntries.Count)] FAIL  $fileSpec  (could not create directory: $parentDir)" -ForegroundColor Red
+            Write-Host "  [$index/$($fileEntries.Count)] FAIL  $depotPath  (could not create directory: $parentDir)" -ForegroundColor Red
             $failureCount++
             $failedFiles.Add($depotPath)
             continue
         }
     }
 
-    # Use p4 print to write the file to the destination
-    Write-Host "  [$index/$($fileEntries.Count)] Copying $fileSpec ..." -ForegroundColor Gray
-    $p4Output = & p4 print -o $destination $fileSpec 2>&1
+    if ($isPending) {
+        # --- Pending CL: copy from local workspace using p4 where ---
+        # Use -ztag for structured output and -c to target the correct client workspace
+        $whereOutput = & p4 -c $p4Client -ztag where $depotPath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [$index/$($fileEntries.Count)] FAIL  $depotPath  (p4 where failed: $($whereOutput -join ' '))" -ForegroundColor Red
+            $failureCount++
+            $failedFiles.Add($depotPath)
+            continue
+        }
+        # Parse the "... path <localPath>" line from -ztag output
+        $localSourcePath = $null
+        foreach ($wLine in $whereOutput) {
+            if ($wLine -match '^\.\.\.\s+path\s+(.+)$') {
+                $localSourcePath = $Matches[1].Trim()
+                break
+            }
+        }
+        if (-not $localSourcePath) {
+            Write-Host "  [$index/$($fileEntries.Count)] FAIL  $depotPath  (could not parse local path from p4 where)" -ForegroundColor Red
+            $failureCount++
+            $failedFiles.Add($depotPath)
+            continue
+        }
 
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [$index/$($fileEntries.Count)] FAIL  $fileSpec" -ForegroundColor Red
-        Write-Host "    $($p4Output -join ' ')" -ForegroundColor DarkRed
-        $failureCount++
-        $failedFiles.Add($depotPath)
+        if (-not (Test-Path $localSourcePath)) {
+            Write-Host "  [$index/$($fileEntries.Count)] FAIL  $depotPath  (local file not found: $localSourcePath)" -ForegroundColor Red
+            $failureCount++
+            $failedFiles.Add($depotPath)
+            continue
+        }
+
+        Write-Host "  [$index/$($fileEntries.Count)] Copying $depotPath (local) ..." -ForegroundColor Gray
+        try {
+            Copy-Item -Path $localSourcePath -Destination $destination -Force
+            Write-Host "  [$index/$($fileEntries.Count)] OK    -> $destination" -ForegroundColor Green
+            $successCount++
+        } catch {
+            Write-Host "  [$index/$($fileEntries.Count)] FAIL  $depotPath  ($_)" -ForegroundColor Red
+            $failureCount++
+            $failedFiles.Add($depotPath)
+        }
     } else {
-        Write-Host "  [$index/$($fileEntries.Count)] OK    -> $destination" -ForegroundColor Green
-        $successCount++
+        # --- Submitted CL: fetch from server using p4 print ---
+        $fileSpec = "$depotPath#$($entry.Revision)"
+        Write-Host "  [$index/$($fileEntries.Count)] Copying $fileSpec ..." -ForegroundColor Gray
+        $p4Output = & p4 print -o $destination $fileSpec 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [$index/$($fileEntries.Count)] FAIL  $fileSpec" -ForegroundColor Red
+            Write-Host "    $($p4Output -join ' ')" -ForegroundColor DarkRed
+            $failureCount++
+            $failedFiles.Add($depotPath)
+        } else {
+            Write-Host "  [$index/$($fileEntries.Count)] OK    -> $destination" -ForegroundColor Green
+            $successCount++
+        }
     }
 }
 
