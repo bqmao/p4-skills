@@ -28,6 +28,14 @@
 
 ---
 
+### [p4-merge-cl](skills/p4-merge-cl/SKILL.md)
+
+將特定已提交的 Perforce Changelist，從來源 Stream 合併到一個或多個目標 Stream。會處理目標工作區準備、定位來源 CL、執行 `p4 merge` 或必要時退回 `p4 integrate`、安全 resolve，以及建立新的待提交 CL 來承接合併結果。
+
+**適用情境：** 想要把某個修正或功能所對應的特定 CL，從一條 Stream 精準合併到其他版本線，包含一次處理多組來源與目標工作區的情況。
+
+---
+
 ### [p4-move-conflict-files](skills/p4-move-conflict-files/SKILL.md)
 
 掃描指定 Changelist 中所有未解決的衝突檔案，並將它們移至一個新建立的待提交 CL，讓衝突可以在獨立的 CL 中處理，不影響原始 CL 的其他檔案繼續推進。
